@@ -1,3 +1,5 @@
+#!C:/Users/LyFei/AppData/Local/Programs/Python/Python36/Python
+
 import quandl
 import numpy as np
 import configparser, os
@@ -5,6 +7,7 @@ import pymysql
 import datetime
 import time
 import json
+import sys
 
 config = configparser.ConfigParser()
 config.readfp(open('defaults.cfg'))
@@ -15,9 +18,11 @@ quandl.ApiConfig.api_version = '2015-04-09'
 
 dbname = 'USTREASURY/YIELD'
 
-def insert_data(startdate):
+def insert_data(dbname, startdate):
+
     db = quandl.Dataset(dbname)
     colnames = db.column_names
+
     ret = quandl.get(dbname, returns="numpy", start_date=startdate, end_date=datetime.date.today())
 
     if(len(ret) > 0):
@@ -38,17 +43,24 @@ def insert_data(startdate):
             cursor.executemany(query, data)
         con.commit()
     currenttime = time.strftime('%Y-%m-%d %H:%M:%S')
-    con.cursor().execute("insert into fetchhistory values ('%s', NULL)" % (currenttime))
+    con.cursor().execute("insert into fetchhistory values ('%s', '%s')" % (currenttime, dbname))
     con.commit()
 
 
-def lastfetch():
-    query = "select max(fetchtime) from fetchhistory"
+def lastfetch(dbname):
+    query = "select max(fetchtime) from fetchhistory where `code` ='%s'" % dbname
     with con.cursor() as cursor:
         cursor.execute(query)
-        return cursor.fetchall()[0][0]
+        date_last = cursor.fetchall()[0][0]
+        if date_last is None:
+            date_last = datetime.datetime(1900, 1, 1)
+        return date_last
 
 
+data = sys.stdin.read()
+js = json.loads(data)
+dbname = js['dbname']
+columnname = js['col']
 
 
 con = pymysql.connect(host = config.get('database', 'hostname'),
@@ -57,21 +69,29 @@ con = pymysql.connect(host = config.get('database', 'hostname'),
                       db = config.get('database', 'database'))
 
 
+query_last_date = "select max(`date`) from quantldata where `code`= '%s'" % dbname;
 
-
-query = "select `date`, `value` from quantldata ORDER BY id DESC LIMIT 1 where `columnname='10 YR'"
+query_data = "select `date`, `value` from quantldata  where `columnname`='%s' and `code`='%s' ORDER BY id DESC LIMIT 1" % (columnname, dbname)
 with con.cursor() as cursor:
-    cursor.execute(query)
-    date, value = cursor.fetchall()[0]
-    #print(date)
-    if date != datetime.date.today() and datetime.datetime.now() - lastfetch() > datetime.timedelta(hours = 1):
-        insert_data(date + datetime.timedelta(days=1))
+    cursor.execute(query_last_date)
+    date = cursor.fetchall()[0][0]
+    if date is None:
+        date = datetime.date(1900, 1, 1)
+    
+    if date != datetime.date.today() and datetime.datetime.now() - lastfetch(dbname) > datetime.timedelta(hours = 1):
+        insert_data(dbname, date + datetime.timedelta(days=1))
 
-    body = json.dumps(value)
+    cursor.execute(query_data)
+    
+
+    date, value = cursor.fetchall()[0]
+
+    data = {'value' : value, 'date' : date.strftime('%Y-%m-%d'), 'last_update_time' : lastfetch(dbname).strftime('%Y-%m-%d %H:%M:%S')}
+    
+    body = json.dumps(data)
     print("Status: 200 OK")
     print("Content-Type: application/json")
     print("Length:", len(body))
     print("")
     print(body)
-    
 con.close()
